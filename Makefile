@@ -1,4 +1,4 @@
-TARGET=main
+TARGET=libmain.so
 CC=gcc
 
 CFLAGS= -Wall -Wextra -g -O2
