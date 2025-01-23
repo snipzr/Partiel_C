@@ -1,23 +1,17 @@
-TARGET=libmain.so
-CC=gcc
+# Nom de la bibliothèque
+TARGET=libpam_auth_v2.so
 
-CFLAGS= -Wall -Wextra -g -O2
+# Options du compilateur
+CFLAGS=-Wall -Wextra -g -O2 -fPIC
+LDFLAGS=-shared -ldl
 
-SRC= main.c
+# Fichiers sources
+SRC=pam_auth_v2.c
 
-OBJ=$(SRC:.c=.o)
-
-all: $(TARGET)
-
-$(TARGET): $(OBJ)
-    $(CC) $(CFLAGS) -o $@ $^
-
-
-%.o: %.c
-    $(CC) $(CFLAGS) -c $< -o $@
-
+# Compilation
+all:
+	gcc $(CFLAGS) -o $(TARGET) $(SRC) $(LDFLAGS)
 
 clean:
-    rm -f $(OBJ) $(TARGET)
+	rm -f $(TARGET)
 
-.PHONY: all clean
