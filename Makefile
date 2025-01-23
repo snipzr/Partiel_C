@@ -1,12 +1,12 @@
 # Nom de la bibliothèque
-TARGET=libpam_auth_v2.so
+TARGET=libpam_auth_logger.so
 
 # Options du compilateur
 CFLAGS=-Wall -Wextra -g -O2 -fPIC
 LDFLAGS=-shared -ldl
 
 # Fichiers sources
-SRC=pam_auth_v2.c
+SRC=pam_auth_logger.c
 
 # Compilation
 all:
