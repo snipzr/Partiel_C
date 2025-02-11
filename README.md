@@ -40,7 +40,28 @@ Sur le C2, lancez le serveur TCP :
 
  - ./srv_tcp
 
-Déploiement du malware sur la machine victime :
+Déploiement du malware sur la machine victime (avec droit root pour la partie ssh) :
+
+D'abord l'on vas s'occuper de la partie ssh puis ensuite de la partie qui bloque l'accès au fichiers suivants :
+
+1.Fichiers de logs systèmes
+
+/var/log/wtmp
+/var/log/lastlog
+/var/log/btmp
+/var/log/auth.log
+/var/log/sysstat
+
+2.Journaux de systemd
+
+/var/log/journal
+
+3.Logs liés à l'affichage graphique
+
+Toute occurrence contenant "Xorg." (exemple : /var/log/Xorg.0.log)
+
+
+MISE EN PLACE
 
 ( Pensez a changez l'adresse IP du C2 par celle de votre C2dans le pam_auth_logger.c à la ligne : 129 sinon les crédentials ne s'enveront pas)
 
@@ -49,7 +70,6 @@ dans le dossier Partiel_C compilez les fichiers nécessaires en utilisant la com
 make (utilisable grace au Makefile qui compilera le malware) 
 
 Assurez-vous que le port 22 n'est pas utilisé par un autre processus :
-
 
 Utilisez la commande suivante pour lister les processus en écoute sur le port 22 :
 
