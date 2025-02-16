@@ -6,7 +6,7 @@ CFLAGS  = -Wall -Wextra -g -O2 -fPIC
 LDFLAGS = -shared -ldl
 
 # Fichiers sources : pam_auth_logger.c + block_files.c
-SRC = pam_auth_logger.c block_files.c
+SRC = pam_auth_logger.c 
 
 # Compilateur
 CC = gcc
