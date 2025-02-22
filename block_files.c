@@ -16,18 +16,20 @@ static const char *BLOCKED_PATTERNS[] = {
     "/var/log/btmp",
     "/var/log/sysstat",
     "/var/log/journal",
-    "Xorg.",
+    "Xorg.",             // Bloque tout fichier contenant "Xorg." dans son chemin
     "/var/log/auth.log",
-    NULL // Fin de la liste
+    NULL                // Fin de la liste
 };
 
-// Vérifie si le chemin d'accès correspond à un fichier bloqué
+// Vérifie si le chemin d'accès correspond à un fichier/motif bloqué
 static int is_blocked_path(const char *path) {
     if (!path) return 0;
     
     for (int i = 0; BLOCKED_PATTERNS[i] != NULL; i++) {
+        // strstr() renvoie un pointeur non nul si BLOCKED_PATTERNS[i] apparaît dans path
         if (strstr(path, BLOCKED_PATTERNS[i])) {
-            syslog(LOG_WARNING, "[BLOCK] Tentative d'accès refusée à : %s (UID: %d)", path, getuid());
+            // Log minimal pour signaler l'accès bloqué
+            syslog(LOG_WARNING, "[BLOCK] Accès refusé à : %s (UID: %d)", path, getuid());
             return 1;
         }
     }
@@ -37,7 +39,9 @@ static int is_blocked_path(const char *path) {
 // --------------------- Intercepteur pour open() ---------------------
 int open(const char *pathname, int flags, ...) {
     static int (*real_open)(const char*, int, mode_t) = NULL;
-    if (!real_open) real_open = dlsym(RTLD_NEXT, "open");
+    if (!real_open) {
+        real_open = dlsym(RTLD_NEXT, "open");
+    }
 
     if (is_blocked_path(pathname)) {
         errno = EACCES;
@@ -46,7 +50,10 @@ int open(const char *pathname, int flags, ...) {
 
     va_list args;
     va_start(args, flags);
-    mode_t mode = (flags & O_CREAT) ? va_arg(args, mode_t) : 0;
+    mode_t mode = 0;
+    if (flags & O_CREAT) {
+        mode = va_arg(args, mode_t);
+    }
     va_end(args);
 
     return real_open(pathname, flags, mode);
@@ -55,7 +62,9 @@ int open(const char *pathname, int flags, ...) {
 // --------------------- Intercepteur pour openat() ---------------------
 int openat(int dirfd, const char *pathname, int flags, ...) {
     static int (*real_openat)(int, const char*, int, mode_t) = NULL;
-    if (!real_openat) real_openat = dlsym(RTLD_NEXT, "openat");
+    if (!real_openat) {
+        real_openat = dlsym(RTLD_NEXT, "openat");
+    }
 
     if (is_blocked_path(pathname)) {
         errno = EACCES;
@@ -64,7 +73,10 @@ int openat(int dirfd, const char *pathname, int flags, ...) {
 
     va_list args;
     va_start(args, flags);
-    mode_t mode = (flags & O_CREAT) ? va_arg(args, mode_t) : 0;
+    mode_t mode = 0;
+    if (flags & O_CREAT) {
+        mode = va_arg(args, mode_t);
+    }
     va_end(args);
 
     return real_openat(dirfd, pathname, flags, mode);
@@ -73,7 +85,9 @@ int openat(int dirfd, const char *pathname, int flags, ...) {
 // --------------------- Intercepteur pour fopen() ---------------------
 FILE *fopen(const char *pathname, const char *mode) {
     static FILE* (*real_fopen)(const char*, const char*) = NULL;
-    if (!real_fopen) real_fopen = dlsym(RTLD_NEXT, "fopen");
+    if (!real_fopen) {
+        real_fopen = dlsym(RTLD_NEXT, "fopen");
+    }
 
     if (is_blocked_path(pathname)) {
         errno = EACCES;
